@@ -17,6 +17,8 @@
     redis-server ./redis.6380.conf >log/6380.log 2>&1 &
     redis-server ./redis.6381.conf >log/6381.log 2>&1 &
     
+    redis-server ./sentinel.conf >log/sentinel.log 2>&1 &
+    
     redis-cli -h 192.168.47.120 -p 6380 slaveof 192.168.47.120 6379
     redis-cli -h 192.168.47.120 -p 6381 slaveof 192.168.47.120 6379
 
