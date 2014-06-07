@@ -237,11 +237,91 @@ kill <ip:port>
 ![redis-replication-interaction][7]
 
 
+每次读取时最多读取16K的数据。
+
 ### 3.5 命令处理
 使用redisCommand来表述命令，其实现代码在redis.c中，入口函数时processCommand。
 
 ### 3.6 事务
 redis通过multi、discard、watch、exec实现数据库事务操作。该部分代码在multi.c中实现。
+
+### 3.7 AOF
+Redis持久化有RDB和AOF两种方式，而针对AOF有appendonly和rewrite两种方式。
+
+appendonly会严格的记录对数据库有修改的所有操作，而rewrite则是数据库快照转换成AOF格式，完成后会替换掉appendonly的文件，文件因更小。如数据库执行了以下操作
+
+    RPUSH mylist [1, 2, 3, 4]
+    RPOP mylist
+    LPUSH mylist 4
+
+那么appendonly方式会记录以上3条命令，而rewrite只会记录最终状态的一条命令，即
+
+    RPUSH mylist [4, 1, 2, 3]
+
+
+#### 3.7.1 appendonly aof
+当打开appendonly标志时，数据库服务器执行的每条命令都会添加到aof_buf中，feedAppendOnlyFile函数进行该动作。该函数执行的动作如下：
+
+* 若当前命令的数据库与aof数据不同，则先添加SELECT命令，然后再按照Redis协议写入命令。
+
+#### 3.7.2 rewrite aof
+利用aof rewrite_buf可以有效的减少数据库持久化文件大小。AOF基本流程如下所示：
+
+* fork子进程把当前数据库状况写入AOF文件，期间禁用数据库rehash操作（防止大量的内存页写，导致数据库占用内存高，因为父进程大量写时，子进程会复制父进程的页）。
+* 在子进程写AOF文件过程中，所有对父进程的操作都会添加到rewrite_buf中；该buf总大小近似为 (buf数 - 1) * 10MB + 最后一个rewrite_buf->used，填充时总是填充满最后一个buf未用完的空间，再分配下一个rewrite_buf（每个rewrite_buf都为10MB）。
+* 后台子进程AOF完成后，在服务器serverCron过程中，检测到子进程结束事件，根据进程是否正常结束进行下述操作：
+
+* 正常结束，将rewrite_buf追加到临时AOF文件中，进行AOF文件同步，打开REDIS_AOF_ON标志（这意味着后续的操作将写入aof_buf中），同时删除旧的（若有）aof_filename，将临时aof文件重命名为aof_filename；
+* 非正常结束，重新调度，状态转为REDIS_AOF_WAIT_REWRITE，下次进入serverCron时重新开始AOF基本流程。
+
+在上述动作中，文件同步、关闭文件、重命名文件都可能造成服务器阻塞，参考代码io_delay.c（地址[https://github.com/kiterunner-t/krt/blob/master/t/linux/src/io/io_delay.c][8]），对于前面两者redis使用后台bio进行异步调用，而对于重命名则通过保留一个原始aof_fd的引用，然后放到后台去关闭来解决。
+
+### 3.8 rdb
+#### 3.8.1 rdb文件格式
+rdb文件格式按照下述规则进行写入：REDIS + 4字节版本号 + 数据库数据 + 结束符0xFF + 8字节的校验和（若未启用校验和，则8字节0）。
+
+数据库数据：0xFE 数据库序号；遍历数据库每个k-v对，按照下述规则写入数据
+
+* （若k-v设置了过期时间，且未过期，则先写入过期操作符）0xFC 8字节的毫秒过期时间；
+* 写入value类型，value类型规则见后面表格；
+* 写入key，key为STRING类型；
+* 写入value。
+
+写入value的类型，根据对象的类型和编码来决定类型
+
+![redis-rdb-type][9]
+
+
+value编码规则如下：
+
+![redis-rdb-value][10]
+
+
+STRING分为INT整数和RAWSTRING两种类型，根据编码规则不同分别使用对应的类型进行编码。
+
+INT整数存储规则
+
+![redis-rdb-int][11]
+
+
+RAWSTRING存储分3种情况
+
+* 长度小于等于11时，若能按整数规则存储，则转换成整数存储；
+* 启用了压缩，且长度大于20，使用lzf压缩方式存储；首字节高2位为11，接下来6位为0x03，即首字节为1100 0011；然后依次为压缩字符串长度，压缩前字符串长度，压缩后字符串；
+* 普通方式，先存长度，再保存字符串。
+
+
+长度存储规则
+
+![redis-rdb-len][12]
+
+
+double类型规则如下
+
+![redis-rdb-double][13]
+
+
+
 
 [1]: images/redis-topology.png "redis-topology"
 [2]: images/redis-event-table.png "redis-event-table"
@@ -250,3 +330,9 @@ redis通过multi、discard、watch、exec实现数据库事务操作。该部分
 [5]: images/hiredis-async.png "hiredis-async"
 [6]: images/redis-client.png "redis-client"
 [7]: images/redis-replication-interaction.png "redis-replication-interaction"
+[9]: images/redis-rdb-type.png "redis-rdb-type"
+[10]: images/redis-rdb-value.png "redis-rdb-value"
+[11]: images/redis-rdb-int.png "redis-rdb-int"
+[12]: images/redis-rdb-len.png "redis-rdb-len"
+[13]: images/redis-rdb-double.png "redis-rdb-double"
+[8]: https://github.com/kiterunner-t/krt/blob/master/t/linux/src/io/io_delay.c
