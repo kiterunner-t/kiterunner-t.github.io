@@ -25,8 +25,7 @@
 
 后续分析以该模型为基础，不断修改，争取构建一个适于分析redis的模型。
 
-## 2 服务器执行流程
-
+## 2 数据库服务器
 信号是单独的，并没有放在redisServer结构中
 
 忽略SIGHUP、SIGPIPE
@@ -104,18 +103,19 @@ serverCron
 * 每100ms进行sentinelTimer操作，tilt模式开启关闭，failover，运行脚本。
 * cronloops加1，每个cronloops值代表大约1ms。
 
-## 3 服务器各子模块
+## 3 sentinel
 
-### 3.1 客户端
+## 4 服务器各子模块
+### 4.1 客户端
 这里客户端是指Redis服务器在处理来自客户端的请求过程中管理资源和请求处理的对象，即围绕redisClient对象所做的工作。networking.c文件中主要就是关于这部分的代码。服务器对其管理的方式是利用链表管理所有客户端，并以客户端对应的fd（非脚本类的客户端，该小节只涉及普通的套接字的客户端）为索引添加到事件处理结构中，其中aeFileEvent->clientDat就指向该结构；对于需要关闭的客户端，也组织在一个链表clients_to_close中， redisClient结构用来表示对端的请求、请求解析、请求处理中间参数以及最终的响应（其他如multi、pubsub等本小节暂不涉及）如下图所示：
 
 ![redis-client][3]
 
 
-#### 3.1.1 接收请求
+#### 4.1.1 接收请求
 readQueryFromClient，该函数是客户端响应来自对端请求的入口函数，它从socket中读取数据，然后调用协议处理函数处理，处理请求，返回响应。
 
-#### 3.1.2 协议处理
+#### 4.1.2 协议处理
 在接收完请求后函数processInputBuffer进行协议解析，请求数据放在redisClient->querybuf中，主要有两种请求类别：REDIS_REQ_INLINE和REDIS_REQ_MULTIBULK，分别调用函数processInlineBuffer和processMultibulkBuffer处理协议。
 
 Redis协议不仅适合人读，也适合计算机解析；在这两个函数实现基本很简单，使用分隔符\r\n分隔请求，按照协议要求组织请求，具体参考图中数据结构示意，一目了然。但在处理过程中有几点需要注意：
@@ -126,10 +126,10 @@ Redis协议不仅适合人读，也适合计算机解析；在这两个函数实
 
 REDIS_BLOCKED标志需要注意一下。
 
-#### 3.1.3 请求处理
+#### 4.1.3 请求处理
 协议解析完成后，调用processCommand进行命令解析（该函数在redis.c中）。
 
-#### 3.1.4 请求响应
+#### 4.1.4 请求响应
 处理完请求后，会调用addReply之类的函数将请求发送给对端。redisClient管理响应有一个16K的静态缓冲区和一个reply链表，首先添加到静态缓冲区，若满，再添加到reply链表中。组织结构如上图所示。（响应的协议在协议节单独表述，这里不涉及）。
 
 replybytes字段表示所有reply链表上的数据暂用的内存大小，该大小并不太准确，因为很多小对象是使用的全局共享对象，并不实际占用多少资源。在发送响应过程中，会根据客户端类别（NORMAL、SLAVE、PUBSUB）计算其所占用的资源是否达到软硬限制，该限制值存储在server.client_obuf_limits数组中。checkClientOutputBufferLimits展现了实现限制的算法，如下所示：
@@ -150,12 +150,12 @@ sendReplyToClient函数用来发送数据给客户端，先发送redisClient->bu
 * 发送过程中，若实际发送的数据超过16K(REDIS_MAX_WRITE_PER_EVENT)，则停止发送数据；但若此时reply占用的内存过大，超过了server.maxmemory限制，则尽量发送，以便尽快释放内存；
 * 发送结束后，若没有更多数据（buf和reply都为空），则从事件循环删除该客户端可写事件，若设置了REDIS_CLOSE_AFTER_REPLY标志时，释放掉客户端。
 
-#### 3.1.5 命令
+#### 4.1.5 命令
 list
 
 kill <ip:port>
 
-### 3.2 复制
+### 4.2 复制
 复制的过程如下图所示
 
 ![redis-replication-interaction][4]
@@ -163,13 +163,13 @@ kill <ip:port>
 
 每次读取时最多读取16K的数据。
 
-### 3.3 命令处理
+### 4.3 命令处理
 使用redisCommand来表述命令，其实现代码在redis.c中，入口函数时processCommand。
 
-### 3.4 事务
+### 4.4 事务
 redis通过multi、discard、watch、exec实现数据库事务操作。该部分代码在multi.c中实现。
 
-### 3.5 AOF
+### 4.5 AOF
 Redis持久化有RDB和AOF两种方式，而针对AOF有appendonly和rewrite两种方式。
 
 appendonly会严格的记录对数据库有修改的所有操作，而rewrite则是数据库快照转换成AOF格式，完成后会替换掉appendonly的文件，文件因更小。如数据库执行了以下操作
@@ -183,12 +183,12 @@ appendonly会严格的记录对数据库有修改的所有操作，而rewrite则
     RPUSH mylist [4, 1, 2, 3]
 
 
-#### 3.5.1 appendonly aof
+#### 4.5.1 appendonly aof
 当打开appendonly标志时，数据库服务器执行的每条命令都会添加到aof_buf中，feedAppendOnlyFile函数进行该动作。该函数执行的动作如下：
 
 * 若当前命令的数据库与aof数据不同，则先添加SELECT命令，然后再按照Redis协议写入命令。
 
-#### 3.5.2 rewrite aof
+#### 4.5.2 rewrite aof
 利用aof rewrite_buf可以有效的减少数据库持久化文件大小。AOF基本流程如下所示：
 
 * fork子进程把当前数据库状况写入AOF文件，期间禁用数据库rehash操作（防止大量的内存页写，导致数据库占用内存高，因为父进程大量写时，子进程会复制父进程的页）。
@@ -200,8 +200,8 @@ appendonly会严格的记录对数据库有修改的所有操作，而rewrite则
 
 在上述动作中，文件同步、关闭文件、重命名文件都可能造成服务器阻塞，参考代码io_delay.c（地址[https://github.com/kiterunner-t/krt/blob/master/t/linux/src/io/io_delay.c][5]），对于前面两者redis使用后台bio进行异步调用，而对于重命名则通过保留一个原始aof_fd的引用，然后放到后台去关闭来解决。
 
-### 3.6 rdb
-#### 3.6.1 rdb文件格式
+### 4.6 rdb
+#### 4.6.1 rdb文件格式
 rdb文件格式按照下述规则进行写入：REDIS + 4字节版本号 + 数据库数据 + 结束符0xFF + 8字节的校验和（若未启用校验和，则8字节0）。
 
 数据库数据：0xFE 数据库序号；遍历数据库每个k-v对，按照下述规则写入数据
@@ -244,7 +244,7 @@ double类型规则如下
 
 ![redis-rdb-double][10]
 
-### 3.7 slowlog
+### 4.7 slowlog
 慢速日志记录了那些最耗时的命令及其相关信息，如下图所示，slowlog_log_lower_than小于0时，表示禁用该功能；否则执行时间该值的命令都会被记录在slowlog链表中。slowlog_max_len表示链表的最大长度，当超过该值时，旧的slowlog将会从链表中删除。slowlogEntry中参数argv最多为32，当超过32时，最后一个参数（即第32个）表示该命令后续还剩多少参数，而对于字符串对象参数来说，slowlog只复制前128字节，后续字节被抛弃，其他对象增加引用计数即可。
 
 ![redis-slowlog][11]
@@ -255,16 +255,36 @@ double类型规则如下
 ![redis-slowlog-command][12]
 
 
-
-### 3.8 pubsub
+### 4.8 pubsub
+在redisServer存储了每个频道有哪些client订阅了，每个client订阅了哪些模式（每个client的不同模式会有不同节点，这是通过client下的pattern链表控制的）。发布消息时，先发那些直接订阅的client，然后在遍历模式列表进行模式匹配，匹配的则发送消息。如下图所示，CLIENT_A订阅了频道hello及频道模式PATTERN_A、PATTERN_B：
 
-### 3.9 debugs
+![redis-pubsub][13]
 
-## 4 库模块
-### 4.1 事件循环
+
+命令如下图所示：
+
+![redis-pubsub-command][14]
+
+
+频道模式使用glob规则，参考util.c中函数stringmatchlen。
+
+@WHY 服务器和客户端都存有相关信息，在发布消息时，只用到了服务器端的信息，客户端为何还要保存有相同的信息？在pubsub模块没有直接的引用。
+
+### 4.9 scripts
+命令以script开始，见下表
+
+![redis-lua-command][15]
+
+
+lua函数都以f_<sha-func-body>来命名存在server.lua_scripts中（见图）。该模块只要工作是提供lua运行环境，提供一些基本的安全的lua函数，提供用户自定义函数脚本，并提供Redis C协议和lua栈之间的转换。
+
+### 4.10 debugs
+
+## 5 库模块
+### 5.1 事件循环
 这里以epoll演示事件循环的机制，不同事件底层机制不同点在于aeApiState。
 
-![redis-eventloop][13]
+![redis-eventloop][16]
 
 提供了以下基本接口
 
@@ -276,18 +296,18 @@ double类型规则如下
 
 el->stop用于事件循环处理器检测事件是否需要停止。每次事件循环进入epoll等待事件发生之前，若设置了beforeSleep函数，则会调用该函数。
 
-#### 4.1.1 定时器事件
+#### 5.1.1 定时器事件
 el->lastTime和el->timeEventNextId用于定时器事件。timeEventNextId用于标识新建定时器，内部自增。lastTime用于检测系统时间被调整到将来，然后又调整回去的情况，每次执行定时器事件时，检测当前时间是否小于该时间，若小于则说明发生了，将所有定时器事件置0，强制都被处理。
 
 如图所示，定时器事件使用链表进行管理，每次新增时将定时器插入到链表头。
 
-#### 4.1.2 文件描述符事件
+#### 5.1.2 文件描述符事件
 el->setsize限制了处理的最大文件描述符，在初始化过程中，就为events、fired、aeApiState下的events分配setsize大小的数组。添加事件时，以文件描述符fd为下标，直接添加到对应的events中，发生事件的fd以及其事件则放在fired下。
 
-### 4.2 hiredis
+### 5.2 hiredis
 hiredis是一个很小巧的用于Redis数据库的客户端库代码，提供了对printf-alike的Redis协议支持，可以对Redis数据库进行同步或异步的访问。
 
-#### 4.2.1 同步
+#### 5.2.1 同步
 6种reply对象：字符串（STATUS和ERROR也是字符串类型）、整数、NIL、ARRAY。
 
     *2 \r\n
@@ -299,7 +319,7 @@ hiredis是一个很小巧的用于Redis数据库的客户端库代码，提供�
 
 上面是一串响应，则结构如下图所示（忽略空格，\r\n为ascii的可读形式）。
 
-![hiredis-sync][14]
+![hiredis-sync][17]
 
 
 整个流程可以简单用文字概括如下：
@@ -322,10 +342,10 @@ API如下：
     void freeReplyObject(void *reply);
 
 
-#### 4.2.2 异步
+#### 5.2.2 异步
 hiredis也提供了异步的方式进行客户服务端的沟通。如下图所示，异步方式需要与事件循环机制结合，图中所示为ae的数据结构（绿色部分，其他事件循环机制如libev、libevent有所不同）。
 
-![hiredis-async][15]
+![hiredis-async][18]
 
 
 异步解析的流程为：
@@ -338,10 +358,10 @@ hiredis也提供了异步的方式进行客户服务端的沟通。如下图所�
 
 @WHY hiredis的异步回调应用场景还需要进一步跟踪，在sentinel中有应用。
 
-### 4.3 rio
+### 5.3 rio
 rio提供了基于文件流和内存流的读、写、位置通告、校验和操作方法（若设置了校验和方法，读写前会进行校验和更新操作），并提供了用于写Redis协议的高层API函数。其基本结构如下图所示（橙色表示函数指针），其中rioFileIO使用标准C流式文件IO进行流式IO操作，rioBufferIO使用sds进行内存流式IO操作。
 
-![redis-rio][16]
+![redis-rio][19]
 
 
 提供了几个API使用，如下
@@ -357,13 +377,13 @@ rio提供了基于文件流和内存流的读、写、位置通告、校验和�
 
 提供了几个更高层次的API用于Redis二进制协议操作的函数。
 
-![redis-rio-api][17]
+![redis-rio-api][20]
 
 
-### 4.4 bio
+### 5.4 bio
 bio通过使用后台线程来执行可能阻塞服务器的操作，目前支持两个操作close和fsync。其实现是通过为每个任务创建一个线程，线程在操作的条件变量上等待任务链表中有任务可做；当调用者有任务可做时，通过bio的接口，将任务放在list中，并通知线程进行处理。线程屏蔽了SIGALRM（Redis用其作为watchdog），防止该后台任务处理线程接收到该信号。结构如下图所示（Redis实现中并没有bio结构体，bio中所有成员都是以文件静态变量的形式单独存放）：
 
-![redis-bio][18]
+![redis-bio][21]
 
 
 接口如下，初始化过程中会根据类型创建不同的后台线程等待任务执行；创建任务时，提交相应任务到对应的链表中，增加计数器，并通知后台线程进行任务处理；bio_pending保存了后台需要处理的任务数量，可以通过接口获取该值。
@@ -387,10 +407,13 @@ bio通过使用后台线程来执行可能阻塞服务器的操作，目前支�
 [10]: images/redis-rdb-double.png "redis-rdb-double"
 [11]: images/redis-slowlog.png "redis-slowlog"
 [12]: images/redis-slowlog-command.png "redis-slowlog-command"
-[13]: images/redis-eventloop.png "redis-eventloop"
-[14]: images/hiredis-sync.png "hiredis-sync"
-[15]: images/hiredis-async.png "hiredis-async"
-[16]: images/redis-rio.png "redis-rio"
-[17]: images/redis-rio-api.png "redis-rio-api"
-[18]: images/redis-bio.png "redis-bio"
+[13]: images/redis-pubsub.png "redis-pubsub"
+[14]: images/redis-pubsub-command.png "redis-pubsub-command"
+[15]: images/redis-lua-command.png "redis-lua-command"
+[16]: images/redis-eventloop.png "redis-eventloop"
+[17]: images/hiredis-sync.png "hiredis-sync"
+[18]: images/hiredis-async.png "hiredis-async"
+[19]: images/redis-rio.png "redis-rio"
+[20]: images/redis-rio-api.png "redis-rio-api"
+[21]: images/redis-bio.png "redis-bio"
 [5]: https://github.com/kiterunner-t/krt/blob/master/t/linux/src/io/io_delay.c
