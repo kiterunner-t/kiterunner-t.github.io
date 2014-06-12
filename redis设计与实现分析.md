@@ -155,6 +155,9 @@ list
 
 kill <ip:port>
 
+monitor
+执行monitor命令的时候，会把该client添加到对应的server->monitors链表中；在执行命令时，会将命令相关信息发到对应的客户端。
+
 ### 4.2 复制
 复制的过程如下图所示
 
@@ -394,26 +397,82 @@ bio通过使用后台线程来执行可能阻塞服务器的操作，目前支�
     unsigned long long bioPendingJobsOfType(int type);
 
 
+### 5.5 adlist
+adlist是一个通用双向链表的实现，其结构如下图所示。list->len保存了链表中节点的数目，图中橙色部分表示节点的一些操作方法，包括节点复制、节点匹配、节点释放。listIter是链表的迭代器实现，可以从链表头和尾两个方向分别进行迭代。链表的实现简单清晰，具体实现可以直接参考代码。
+
+![redis-ds-adlist][22]
 
 
-[1]: images/redis-topology.png "redis-topology"
-[2]: images/redis-event-table.png "redis-event-table"
-[3]: images/redis-client.png "redis-client"
-[4]: images/redis-replication-interaction.png "redis-replication-interaction"
-[6]: images/redis-rdb-type.png "redis-rdb-type"
-[7]: images/redis-rdb-value.png "redis-rdb-value"
-[8]: images/redis-rdb-int.png "redis-rdb-int"
-[9]: images/redis-rdb-len.png "redis-rdb-len"
-[10]: images/redis-rdb-double.png "redis-rdb-double"
-[11]: images/redis-slowlog.png "redis-slowlog"
-[12]: images/redis-slowlog-command.png "redis-slowlog-command"
-[13]: images/redis-pubsub.png "redis-pubsub"
-[14]: images/redis-pubsub-command.png "redis-pubsub-command"
-[15]: images/redis-lua-command.png "redis-lua-command"
-[16]: images/redis-eventloop.png "redis-eventloop"
-[17]: images/hiredis-sync.png "hiredis-sync"
-[18]: images/hiredis-async.png "hiredis-async"
-[19]: images/redis-rio.png "redis-rio"
-[20]: images/redis-rio-api.png "redis-rio-api"
-[21]: images/redis-bio.png "redis-bio"
+### 5.6 sds
+sds是一个动态字符串，本身被定义为char *，但在每个分配的字符串内存前有带有一个sdshdr，如下图所示。在向sds添加数据过程中，sds内存会自动增长（sdscat等请求的大小之外的空间），其增长策略是小于1MB时，按照指数方式扩充，当大于1MB时，每次最多增长1MB。因此，对于大数据的
+
+![redis-ds-sds][23]
+
+
+
+    sds sdstrim(sds s, const char *cset);
+
+删除s中开始和结束包含cset的字符，若在开始有，会进行内存移动，保证sdshdr->buf总是有效的内存。
+
+
+    sds sdsrange(sds s, int start, int end);
+
+把s从start截断到end。start和end为索引位置，如[1, -1]表示从第二个字节到s结束。若s开始位置有变动，则会进行memmove操作。
+
+
+    sds *sdssplitlen(const char *s, int len, const char *sep, int seplen, int *count);
+    void sdsfreesplitres(sds *tokens, int count);
+
+将s以sep为分隔符分隔成若干个sds字符串，s和sep都是二进制安全的。
+
+
+    sds sdscatrepr(sds s, const char *p, size_t len);
+
+将s转换成人可读的形式，首先在开始结束加上双引号，除下列字符其他字符不进行处理：
+
+* \, "：\\\, \\"
+* \n, \r, \t, \a, \b：\\n, \\r, \\t, \\a, \\b
+* 不可打印字符：\\x%02x的形式，如\\x0a
+
+
+    sds *sdssplitargs(const char *line, int *argc);
+    void sdssplitargs_free(sds *argv, int argc);
+
+将命令行参数解析成sds数组，argc表示数组大小。
+
+
+    sds sdsmapchars(sds s, const char *from, const char *to, size_t setlen);
+
+将s中from字符集的字符映射成to中的对应字符集，setlen表示from和to中字符集的个数，二者必须严格一一对应。
+
+### 5.7 dict
+
+![redis-ds-dict][24]
+
+
+
+
+[1]: images/redis/redis-topology.png "redis-topology"
+[2]: images/redis/redis-event-table.png "redis-event-table"
+[3]: images/redis/redis-client.png "redis-client"
+[4]: images/redis/redis-replication-interaction.png "redis-replication-interaction"
+[6]: images/redis/redis-rdb-type.png "redis-rdb-type"
+[7]: images/redis/redis-rdb-value.png "redis-rdb-value"
+[8]: images/redis/redis-rdb-int.png "redis-rdb-int"
+[9]: images/redis/redis-rdb-len.png "redis-rdb-len"
+[10]: images/redis/redis-rdb-double.png "redis-rdb-double"
+[11]: images/redis/redis-slowlog.png "redis-slowlog"
+[12]: images/redis/redis-slowlog-command.png "redis-slowlog-command"
+[13]: images/redis/redis-pubsub.png "redis-pubsub"
+[14]: images/redis/redis-pubsub-command.png "redis-pubsub-command"
+[15]: images/redis/redis-lua-command.png "redis-lua-command"
+[16]: images/redis/redis-eventloop.png "redis-eventloop"
+[17]: images/redis/hiredis-sync.png "hiredis-sync"
+[18]: images/redis/hiredis-async.png "hiredis-async"
+[19]: images/redis/redis-rio.png "redis-rio"
+[20]: images/redis/redis-rio-api.png "redis-rio-api"
+[21]: images/redis/redis-bio.png "redis-bio"
+[22]: images/redis/redis-ds-adlist.png "redis-ds-adlist"
+[23]: images/redis/redis-ds-sds.png "redis-ds-sds"
+[24]: images/redis/redis-ds-dict.png "redis-ds-dict"
 [5]: https://github.com/kiterunner-t/krt/blob/master/t/linux/src/io/io_delay.c
