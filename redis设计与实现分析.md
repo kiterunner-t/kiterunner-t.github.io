@@ -55,28 +55,6 @@ SIGSEGV、SIGBUS、SIGFPE、SIGILL，发生了极端严重的编程错误，debu
 * 从磁盘加载数据库持久化文件。
 * 事件循环，服务器初始化完成，各子模块开始干活。
 
-sentinel服务器初始化流程，与数据库服务器相比，多数流程一样，少了部分与数据库相关的初始化工作，同时也做了一些数据有关的无用初始化。
-
-* 初始化服务器参数，如设置OOM处理器、字典随机数种子，初始化服务器默认配置initServerConfig。
-* 命令行选项解析、服务器配置加载。命令行选项解析（非-vh、--test-memory之类的控制服务器的选项）后，读取配置文件，并将命令行选项直接附加到配置文件的sds串中，调用loadServerConfigFromString，将各选项配置到表示服务器的结构体server中。清空数据库服务器的命令，仅仅sentinel的命令可用。
-* 若设置了daemonize选项，则服务器daemonize化。
-* 初始化服务器各子模块，如下：
-
-    * 初始化信号处理器，忽略SIGHUP、SIGPIPE，设置SIGTERM触发时置位关闭服务器标志，设置SIGSEGV、SIGBUS、SIGFPE、SIGILL为debug模块处理函数。
-    * 初始化日志模块，主要是syslog，普通日志已在前面配置加载部分初始化了。
-    * 初始化客户端模块。
-    * 初始化slaves模块。
-    * 创建服务器共享对象、调整服务器软件限制。
-    * 事件循环模块初始化，打开ipfd、sofd套接字。
-    * （不需要）初始化数据库模块。
-    * 初始化发布订阅模块。
-    * （不需要）初始化持久化rdb/aof模块。
-    * 初始化脚本模块。
-    * （不需要）初始化慢速日志模块。
-    * （不需要）初始化bio模块。
-
-* 事件循环，服务器初始化完成，各子模块开始干活。
-
 业务执行流程（接收请求、请求管理、请求返回）
 在服务器初始化以及后续来自客户端连接过程中，添加了以下事件（beforeSleep虽然不是事件，但每次进入事件等待前会调用该函数，因此也在这里分析）。
 
@@ -104,6 +82,28 @@ serverCron
 * cronloops加1，每个cronloops值代表大约1ms。
 
 ## 3 sentinel
+sentinel服务器初始化流程，与数据库服务器相比，多数流程一样，少了部分与数据库相关的初始化工作，同时也做了一些数据有关的无用初始化。
+
+* 初始化服务器参数，如设置OOM处理器、字典随机数种子，初始化服务器默认配置initServerConfig。
+* 命令行选项解析、服务器配置加载。命令行选项解析（非-vh、--test-memory之类的控制服务器的选项）后，读取配置文件，并将命令行选项直接附加到配置文件的sds串中，调用loadServerConfigFromString，将各选项配置到表示服务器的结构体server中。清空数据库服务器的命令，仅仅sentinel的命令可用。
+* 若设置了daemonize选项，则服务器daemonize化。
+* 初始化服务器各子模块，如下：
+
+    * 初始化信号处理器，忽略SIGHUP、SIGPIPE，设置SIGTERM触发时置位关闭服务器标志，设置SIGSEGV、SIGBUS、SIGFPE、SIGILL为debug模块处理函数。
+    * 初始化日志模块，主要是syslog，普通日志已在前面配置加载部分初始化了。
+    * 初始化客户端模块。
+    * 初始化slaves模块。
+    * 创建服务器共享对象、调整服务器软件限制。
+    * 事件循环模块初始化，打开ipfd、sofd套接字。
+    * （不需要）初始化数据库模块。
+    * 初始化发布订阅模块。
+    * （不需要）初始化持久化rdb/aof模块。
+    * 初始化脚本模块。
+    * （不需要）初始化慢速日志模块。
+    * （不需要）初始化bio模块。
+
+* 事件循环，服务器初始化完成，各子模块开始干活。
+
 
 ## 4 服务器各子模块
 ### 4.1 客户端
@@ -446,9 +446,41 @@ sds是一个动态字符串，本身被定义为char *，但在每个分配的�
 将s中from字符集的字符映射成to中的对应字符集，setlen表示from和to中字符集的个数，二者必须严格一一对应。
 
 ### 5.7 dict
+字典使用了两个散列桶，双哈希桶的设置的主要功能是将耗资源的resize和rehash两个动作分摊到每一个查询、增加、删除以及周期性等操作中。
 
 ![redis-ds-dict][24]
 
+
+### 5.8 intset
+
+![redis-ds-intset][25]
+
+
+### 5.9 ziplist
+ziplist是一种平坦数据结构，通过编码将整数和字符串放到一段内存中，支持以链表的方式来操作该段内存。ziplist结构如下图所示，头部信息由2个uint32_t的长度和最后一个元素偏移量，以及一个uint16_t计数节点个数，图中也表示了一个空节点对象的内存布局。其中需要注意的是，end偏移量在没有节点时为end节点的偏移量，否则为最后一个节点开始的偏移量。
+
+![redis-ds-ziplist-zl][26]
+
+
+由于使用uint16_t来表示节点的数量，因此当节点数小于UINT16_MAX时可以直接返回。当超过该值时，需要遍历节点才能知道准确数量；同时，删除、增加等操作都不再更新该域。
+
+每个节点entry由4部分组成，如下图所示，即前一个节点的长度、节点编码、节点长度和节点内容。注意，这几个部分并不一定存在单独的内存字节空间来表示，如对于0-12的整数，编码类型、内容长度和内容三个部分用1个字节就表示了。
+
+![redis-ds-ziplist-entry][27]
+
+
+* 前一个节点长度由存储该长度所需空间和其值两部分组成，该长度是节点的完整长度，包括节点的所有4个组成部分。该部分所占大小为1或5字节。
+
+    * 节点长度小于等于254，直接使用一个字节存储该长度。
+    * 节点长度大于254，则第一个字节为标志位0xFE，后面跟四个字节的长度。
+
+* 其他三个部分的编码情况如表格所示，有3种类型：字符串、整数和结束符。
+
+
+![redis-table-ds-ziplist-entry][28]
+
+
+了解了ziplist的内存布局及编码方式，那么查找、删除、范围删除、新增节点等各种操作的实现就较为简单了。需要注意的是在删除、新增节点过程中，由于关联的节点发生了变化，则某些节点的“前一个节点长度”可能容纳不下前一个节点长度，或者长度太长，那么则需要进行级联更新。在实现过程中，Redis只对长度不够的情况进行扩充处理，而对于另一种情况则强制用较大的空间存储该长度，避免更多的内存拷贝操作。具体实现参考__ziplistCascadeUpdate函数。（注意，该函数在特殊情况下可能引起较严重的不断内存拷贝操作）。
 
 
 
@@ -475,4 +507,8 @@ sds是一个动态字符串，本身被定义为char *，但在每个分配的�
 [22]: images/redis/redis-ds-adlist.png "redis-ds-adlist"
 [23]: images/redis/redis-ds-sds.png "redis-ds-sds"
 [24]: images/redis/redis-ds-dict.png "redis-ds-dict"
+[25]: images/redis/redis-ds-intset.png "redis-ds-intset"
+[26]: images/redis/redis-ds-ziplist-zl.png "redis-ds-ziplist-zl"
+[27]: images/redis/redis-ds-ziplist-entry.png "redis-ds-ziplist-entry"
+[28]: images/redis/redis-table-ds-ziplist-entry.png "redis-table-ds-ziplist-entry"
 [5]: https://github.com/kiterunner-t/krt/blob/master/t/linux/src/io/io_delay.c
