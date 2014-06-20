@@ -185,9 +185,49 @@ redis通过multi、discard、watch、exec实现数据库事务操作。该部分
 #### 4.5.1 REDIS_STRING
 对于字符串类型，主要支持sds字符串对象、整数对象（小整数是共享的）、浮点数。整数尽量使用long类型来表示，不占用单独的空间；对于long不能表示的部分，则转换成sds字符串形式进行保存；浮点数则使用%.17Lf格式符保存为sds字符串形式。
 
-单个sds字符串最大为512MB，超过该长度的话，则需要进行拆分。
+单个sds字符串最大为512MB，超过该长度的话，则需要进行拆分。该模块在t_string.c中实现了以下命令：
+
+* get、getset、set、setnx、setex、psetex
+* getrange、setrange
+* mget、mset、msetnx
+* incr、decr、incrby、decrby、incrbyfloat
+* append、strlen
 
 #### 4.5.2 REDIS_LIST
+根据object对象的类型和编码方式，REDIS_LIST有两种编码方式，一种是ziplist，一种是linkedlist。在实现REDIS_LIST数据库对象时，Redis使用了一个迭代器来屏蔽这两种编码方式的差异，并且在需要时自动将ziplist转换成linkedlist编码。文件t_list.c实现了这种数据类型及其支持的命令。
+
+对于ziplist转换成linkedlist的条件是：ziplist中长度超过了server.list_max_ziplist_value。list类型的其他操作就是简单的ziplist和linkedlist的封装，代码很直观，根据不同的编码类型执行底层的对应操作。支持下述操作：
+
+* listTypePush
+* listTypePop
+* listTypeLength
+* listTypeInsert
+* listTypeEqual
+* listTypeDelete
+* listTypeConvert
+
+listTypeIterator是ziplist和list的简单封装，屏蔽两种编码方式的差异。
+
+命令
+
+* lpush、rpush、lpushx、rpushx
+* lpop、rpop、lrange、ltrim、lrem、rpoplpush
+* linsert、llen、lindex、lset
+* blpop、brpop、brpoplpush
+
+对于阻塞的命令blpop、brpop等命令，Redis是分成3步来处理的，其使用到的数据结构如下图所示：
+
+* 将阻塞的\<key:redisClient>添加到数据库阻塞字典中，即字典redisDb->blocking_keys中，每个key对应一个阻塞在该key的客户端链表。
+* 其他客户端执行命令写入了该key，调用signalListAsReady，将该key写入到redisServer->ready_keys链表中，同时在数据库redisDb->ready_keys字典中也加入该key，value为null。这里用一个链表和字典存储同一个东西是为了下一步查找时不用遍历链表，保证查找O(1)的复杂度。
+* 命令处理完成后调用handleClientsBlockedOnLists，遍历redisServer->ready_keys中已经准备好的key，遍历阻塞在该key上的客户端，即redisDb->blocking_keys字典中\<key:list\<redisClient>>，将每一个客户端添加到服务器redisServer->unblocked_clients链表。
+* 在进入事件循环前，处理非阻塞的链表redisServer->unblocked_clients。
+* 在serverCron->clientCron中处理阻塞超时的客户端，踢掉redisClient->clients中阻塞超时的客户端。
+
+![redis-db-list][6]
+
+
+target字段的含义？
+
 #### 4.5.3 REDIS_HASH
 #### 4.5.4 REDIS_SET
 #### 4.5.5 REDIS_ZSET
@@ -221,7 +261,7 @@ appendonly会严格的记录对数据库有修改的所有操作，而rewrite则
 * 正常结束，将rewrite_buf追加到临时AOF文件中，进行AOF文件同步，打开REDIS_AOF_ON标志（这意味着后续的操作将写入aof_buf中），同时删除旧的（若有）aof_filename，将临时aof文件重命名为aof_filename；
 * 非正常结束，重新调度，状态转为REDIS_AOF_WAIT_REWRITE，下次进入serverCron时重新开始AOF基本流程。
 
-在上述动作中，文件同步、关闭文件、重命名文件都可能造成服务器阻塞，参考代码io_delay.c（地址[https://github.com/kiterunner-t/krt/blob/master/t/linux/src/io/io_delay.c][6]），对于前面两者redis使用后台bio进行异步调用，而对于重命名则通过保留一个原始aof_fd的引用，然后放到后台去关闭来解决。
+在上述动作中，文件同步、关闭文件、重命名文件都可能造成服务器阻塞，参考代码io_delay.c（地址[https://github.com/kiterunner-t/krt/blob/master/t/linux/src/io/io_delay.c][7]），对于前面两者redis使用后台bio进行异步调用，而对于重命名则通过保留一个原始aof_fd的引用，然后放到后台去关闭来解决。
 
 ### 4.7 rdb
 #### 4.7.1 rdb文件格式
@@ -236,19 +276,19 @@ rdb文件格式按照下述规则进行写入：REDIS + 4字节版本号 + 数�
 
 写入value的类型，根据对象的类型和编码来决定类型
 
-![redis-rdb-type][7]
+![redis-rdb-type][8]
 
 
 value编码规则如下：
 
-![redis-rdb-value][8]
+![redis-rdb-value][9]
 
 
 STRING分为INT整数和RAWSTRING两种类型，根据编码规则不同分别使用对应的类型进行编码。
 
 INT整数存储规则
 
-![redis-rdb-int][9]
+![redis-rdb-int][10]
 
 
 RAWSTRING存储分3种情况
@@ -260,33 +300,33 @@ RAWSTRING存储分3种情况
 
 长度存储规则
 
-![redis-rdb-len][10]
+![redis-rdb-len][11]
 
 
 double类型规则如下
 
-![redis-rdb-double][11]
+![redis-rdb-double][12]
 
 ### 4.8 slowlog
 慢速日志记录了那些最耗时的命令及其相关信息，如下图所示，slowlog_log_lower_than小于0时，表示禁用该功能；否则执行时间该值的命令都会被记录在slowlog链表中。slowlog_max_len表示链表的最大长度，当超过该值时，旧的slowlog将会从链表中删除。slowlogEntry中参数argv最多为32，当超过32时，最后一个参数（即第32个）表示该命令后续还剩多少参数，而对于字符串对象参数来说，slowlog只复制前128字节，后续字节被抛弃，其他对象增加引用计数即可。
 
-![redis-slowlog][12]
+![redis-slowlog][13]
 
 
 慢速日志从头部开始插入，丢弃是从链表末尾开始。提供了slowlog命令可以访问该子模块信息
 
-![redis-slowlog-command][13]
+![redis-slowlog-command][14]
 
 
 ### 4.9 pubsub
 在redisServer存储了每个频道有哪些client订阅了，每个client订阅了哪些模式（每个client的不同模式会有不同节点，这是通过client下的pattern链表控制的）。发布消息时，先发那些直接订阅的client，然后在遍历模式列表进行模式匹配，匹配的则发送消息。如下图所示，CLIENT_A订阅了频道hello及频道模式PATTERN_A、PATTERN_B：
 
-![redis-pubsub][14]
+![redis-pubsub][15]
 
 
 命令如下图所示：
 
-![redis-pubsub-command][15]
+![redis-pubsub-command][16]
 
 
 频道模式使用glob规则，参考util.c中函数stringmatchlen。
@@ -296,7 +336,7 @@ double类型规则如下
 ### 4.10 scripts
 命令以script开始，见下表
 
-![redis-lua-command][16]
+![redis-lua-command][17]
 
 
 lua函数都以f_<sha-func-body>来命名存在server.lua_scripts中（见图）。该模块只要工作是提供lua运行环境，提供一些基本的安全的lua函数，提供用户自定义函数脚本，并提供Redis C协议和lua栈之间的转换。
@@ -307,7 +347,7 @@ lua函数都以f_<sha-func-body>来命名存在server.lua_scripts中（见图）
 ### 5.1 事件循环
 这里以epoll演示事件循环的机制，不同事件底层机制不同点在于aeApiState。
 
-![redis-eventloop][17]
+![redis-eventloop][18]
 
 提供了以下基本接口
 
@@ -342,7 +382,7 @@ hiredis是一个很小巧的用于Redis数据库的客户端库代码，提供�
 
 上面是一串响应，则结构如下图所示（忽略空格，\r\n为ascii的可读形式）。
 
-![hiredis-sync][18]
+![hiredis-sync][19]
 
 
 整个流程可以简单用文字概括如下：
@@ -368,7 +408,7 @@ API如下：
 #### 5.2.2 异步
 hiredis也提供了异步的方式进行客户服务端的沟通。如下图所示，异步方式需要与事件循环机制结合，图中所示为ae的数据结构（绿色部分，其他事件循环机制如libev、libevent有所不同）。
 
-![hiredis-async][19]
+![hiredis-async][20]
 
 
 异步解析的流程为：
@@ -384,7 +424,7 @@ hiredis也提供了异步的方式进行客户服务端的沟通。如下图所�
 ### 5.3 rio
 rio提供了基于文件流和内存流的读、写、位置通告、校验和操作方法（若设置了校验和方法，读写前会进行校验和更新操作），并提供了用于写Redis协议的高层API函数。其基本结构如下图所示（橙色表示函数指针），其中rioFileIO使用标准C流式文件IO进行流式IO操作，rioBufferIO使用sds进行内存流式IO操作。
 
-![redis-rio][20]
+![redis-rio][21]
 
 
 提供了几个API使用，如下
@@ -400,13 +440,13 @@ rio提供了基于文件流和内存流的读、写、位置通告、校验和�
 
 提供了几个更高层次的API用于Redis二进制协议操作的函数。
 
-![redis-rio-api][21]
+![redis-rio-api][22]
 
 
 ### 5.4 bio
 bio通过使用后台线程来执行可能阻塞服务器的操作，目前支持两个操作close和fsync。其实现是通过为每个任务创建一个线程，线程在操作的条件变量上等待任务链表中有任务可做；当调用者有任务可做时，通过bio的接口，将任务放在list中，并通知线程进行处理。线程屏蔽了SIGALRM（Redis用其作为watchdog），防止该后台任务处理线程接收到该信号。结构如下图所示（Redis实现中并没有bio结构体，bio中所有成员都是以文件静态变量的形式单独存放）：
 
-![redis-bio][22]
+![redis-bio][23]
 
 
 接口如下，初始化过程中会根据类型创建不同的后台线程等待任务执行；创建任务时，提交相应任务到对应的链表中，增加计数器，并通知后台线程进行任务处理；bio_pending保存了后台需要处理的任务数量，可以通过接口获取该值。
@@ -420,13 +460,13 @@ bio通过使用后台线程来执行可能阻塞服务器的操作，目前支�
 ### 5.5 adlist
 adlist是一个通用双向链表的实现，其结构如下图所示。list->len保存了链表中节点的数目，图中橙色部分表示节点的一些操作方法，包括节点复制、节点匹配、节点释放。listIter是链表的迭代器实现，可以从链表头和尾两个方向分别进行迭代。链表的实现简单清晰，具体实现可以直接参考代码。
 
-![redis-ds-adlist][23]
+![redis-ds-adlist][24]
 
 
 ### 5.6 sds
 sds是一个动态字符串，本身被定义为char *，但在每个分配的字符串内存前有带有一个sdshdr，如下图所示。在向sds添加数据过程中，sds内存会自动增长（sdscat等请求的大小之外的空间），其增长策略是小于1MB时，按照指数方式扩充，当大于1MB时，每次最多增长1MB。因此，对于大数据的
 
-![redis-ds-sds][24]
+![redis-ds-sds][25]
 
 
 
@@ -468,7 +508,7 @@ sds是一个动态字符串，本身被定义为char *，但在每个分配的�
 ### 5.7 dict
 字典使用了两个散列桶，双哈希桶的设置的主要功能是将耗资源的resize和rehash两个动作分摊到每一个查询、增加、删除以及周期性等操作中。
 
-![redis-ds-dict][25]
+![redis-ds-dict][26]
 
 
 dict_can_resize
@@ -490,21 +530,28 @@ dictRehash进行重新散列字典，参数中n表示要进行多少个有效槽
 hash桶的初始大小（最小）为4。
 
 ### 5.8 intset
+intset是整数集合的表示（小端方式存储），encoding指明了整数的类型，有3种类型：
 
-![redis-ds-intset][26]
+* INTSET_ENC_INT16，取值范围[INT16_MIN, INT16_MAX]
+* INTSET_ENC_INT32，取值范围[INT32_MIN, INT16_MIN), (INT16_MAX, INT32_MAX]
+* INTSET_ENC_INT64，取值范围[INT64_MIN, INT32_MIN), (INT32_MAX, INT64_MAX]
+
+intset的内存结构如下图所示，其中contents数组的每个元素大小根据编码类型不同而有所区别，可能为2、4、8字节。
+
+![redis-ds-intset][27]
 
 
 ### 5.9 ziplist
 ziplist是一种平坦数据结构，通过编码将整数和字符串放到一段内存中，支持以链表的方式来操作该段内存。ziplist结构如下图所示，头部信息由2个uint32_t的长度和最后一个元素偏移量，以及一个uint16_t计数节点个数，图中也表示了一个空节点对象的内存布局。其中需要注意的是，end偏移量在没有节点时为end节点的偏移量，否则为最后一个节点开始的偏移量。
 
-![redis-ds-ziplist-zl][27]
+![redis-ds-ziplist-zl][28]
 
 
 由于使用uint16_t来表示节点的数量，因此当节点数小于UINT16_MAX时可以直接返回。当超过该值时，需要遍历节点才能知道准确数量；同时，删除、增加等操作都不再更新该域。
 
 每个节点entry由4部分组成，如下图所示，即前一个节点的长度、节点编码、节点长度和节点内容。注意，这几个部分并不一定存在单独的内存字节空间来表示，如对于0-12的整数，编码类型、内容长度和内容三个部分用1个字节就表示了。
 
-![redis-ds-ziplist-entry][28]
+![redis-ds-ziplist-entry][29]
 
 
 * 前一个节点长度由存储该长度所需空间和其值两部分组成，该长度是节点的完整长度，包括节点的所有4个组成部分。该部分所占大小为1或5字节。
@@ -515,7 +562,7 @@ ziplist是一种平坦数据结构，通过编码将整数和字符串放到一�
 * 其他三个部分的编码情况如表格所示，有3种类型：字符串、整数和结束符。
 
 
-![redis-table-ds-ziplist-entry][29]
+![redis-table-ds-ziplist-entry][30]
 
 
 了解了ziplist的内存布局及编码方式，那么查找、删除、范围删除、新增节点等各种操作的实现就较为简单了。需要注意的是在删除、新增节点过程中，由于关联的节点发生了变化，则某些节点的“前一个节点长度”可能容纳不下前一个节点长度，或者长度太长，那么则需要进行级联更新。在实现过程中，Redis只对长度不够的情况进行扩充处理，而对于另一种情况则强制用较大的空间存储该长度，避免更多的内存拷贝操作。具体实现参考__ziplistCascadeUpdate函数。（注意，该函数在特殊情况下可能引起较严重的不断内存拷贝操作）。
@@ -523,7 +570,7 @@ ziplist是一种平坦数据结构，通过编码将整数和字符串放到一�
 ### 5.10 zipmap
 zipmap存储了key-value对象，其基本结构如下图所示。
 
-![redis-ds-zipmap][30]
+![redis-ds-zipmap][31]
 
 
 zipmap本身结构较简单，各部分含义如下：
@@ -553,34 +600,57 @@ zipmap本身结构较简单，各部分含义如下：
 
 ### 5.11 object
 
+5种对象类型，每种类型有不同的编码方式。
+
+![redis-ds-object-encoding][32]
+
+
+整数对象有3种表示方式：
+
+* [0, 9999]使用系统初始创建的共享对象，直接使用指针保存该整数；
+* [LONG_MIN, 0), [10000, LONG_MAX]非共享对象，直接使用指针保存整数；
+* 其他（对于64位机器来说，不存在，32位机器时）将long long保存为sds字符串形式保存。
+
+浮点数，使用格式符%.17Lf转换成sds字符串形式保存。
+
+引用计数
+lru
+
+编码转换 tryObjectEncoding
+
+命令
+object refcount|encoding|idletime <object>
+
 
 [1]: images/redis/redis-topology.png "redis-topology"
 [2]: images/redis/redis-event-table.png "redis-event-table"
 [3]: images/redis/redis-client.png "redis-client"
 [4]: images/redis/redis-replication-interaction.png "redis-replication-interaction"
 [5]: images/redis/redis-db.png "redis-db"
-[7]: images/redis/redis-rdb-type.png "redis-rdb-type"
-[8]: images/redis/redis-rdb-value.png "redis-rdb-value"
-[9]: images/redis/redis-rdb-int.png "redis-rdb-int"
-[10]: images/redis/redis-rdb-len.png "redis-rdb-len"
-[11]: images/redis/redis-rdb-double.png "redis-rdb-double"
-[12]: images/redis/redis-slowlog.png "redis-slowlog"
-[13]: images/redis/redis-slowlog-command.png "redis-slowlog-command"
-[14]: images/redis/redis-pubsub.png "redis-pubsub"
-[15]: images/redis/redis-pubsub-command.png "redis-pubsub-command"
-[16]: images/redis/redis-lua-command.png "redis-lua-command"
-[17]: images/redis/redis-eventloop.png "redis-eventloop"
-[18]: images/redis/hiredis-sync.png "hiredis-sync"
-[19]: images/redis/hiredis-async.png "hiredis-async"
-[20]: images/redis/redis-rio.png "redis-rio"
-[21]: images/redis/redis-rio-api.png "redis-rio-api"
-[22]: images/redis/redis-bio.png "redis-bio"
-[23]: images/redis/redis-ds-adlist.png "redis-ds-adlist"
-[24]: images/redis/redis-ds-sds.png "redis-ds-sds"
-[25]: images/redis/redis-ds-dict.png "redis-ds-dict"
-[26]: images/redis/redis-ds-intset.png "redis-ds-intset"
-[27]: images/redis/redis-ds-ziplist-zl.png "redis-ds-ziplist-zl"
-[28]: images/redis/redis-ds-ziplist-entry.png "redis-ds-ziplist-entry"
-[29]: images/redis/redis-table-ds-ziplist-entry.png "redis-table-ds-ziplist-entry"
-[30]: images/redis/redis-ds-zipmap.png "redis-ds-zipmap"
-[6]: https://github.com/kiterunner-t/krt/blob/master/t/linux/src/io/io_delay.c
+[6]: images/redis/redis-db-list.png "redis-db-list"
+[8]: images/redis/redis-rdb-type.png "redis-rdb-type"
+[9]: images/redis/redis-rdb-value.png "redis-rdb-value"
+[10]: images/redis/redis-rdb-int.png "redis-rdb-int"
+[11]: images/redis/redis-rdb-len.png "redis-rdb-len"
+[12]: images/redis/redis-rdb-double.png "redis-rdb-double"
+[13]: images/redis/redis-slowlog.png "redis-slowlog"
+[14]: images/redis/redis-slowlog-command.png "redis-slowlog-command"
+[15]: images/redis/redis-pubsub.png "redis-pubsub"
+[16]: images/redis/redis-pubsub-command.png "redis-pubsub-command"
+[17]: images/redis/redis-lua-command.png "redis-lua-command"
+[18]: images/redis/redis-eventloop.png "redis-eventloop"
+[19]: images/redis/hiredis-sync.png "hiredis-sync"
+[20]: images/redis/hiredis-async.png "hiredis-async"
+[21]: images/redis/redis-rio.png "redis-rio"
+[22]: images/redis/redis-rio-api.png "redis-rio-api"
+[23]: images/redis/redis-bio.png "redis-bio"
+[24]: images/redis/redis-ds-adlist.png "redis-ds-adlist"
+[25]: images/redis/redis-ds-sds.png "redis-ds-sds"
+[26]: images/redis/redis-ds-dict.png "redis-ds-dict"
+[27]: images/redis/redis-ds-intset.png "redis-ds-intset"
+[28]: images/redis/redis-ds-ziplist-zl.png "redis-ds-ziplist-zl"
+[29]: images/redis/redis-ds-ziplist-entry.png "redis-ds-ziplist-entry"
+[30]: images/redis/redis-table-ds-ziplist-entry.png "redis-table-ds-ziplist-entry"
+[31]: images/redis/redis-ds-zipmap.png "redis-ds-zipmap"
+[32]: images/redis/redis-ds-object-encoding.png "redis-ds-object-encoding"
+[7]: https://github.com/kiterunner-t/krt/blob/master/t/linux/src/io/io_delay.c
