@@ -1,5 +1,7 @@
 
-    kiterunner_t    TO THE HAPPY FEW
+    kiterunner_t
+    TO THE HAPPY FEW
+
 
 ## 1 环境准备
 从2.6.4版本为基础了解redis的设计与实现，首先搭建一个原始模型，以便根据这个模型分析其代码的设计与实现（当然，随着进一步对redis细节的了解，肯定会对该模型进行调整，以便更适合分析其设计与实现细节）。在对该版本有较深的了解后，跟随github代码库，追踪新功能添加、bug/issue等过程，更进一步的了解redis的发展，直至最新版本，以求更全面的掌握这个分布式的k-v存储数据库。
@@ -11,9 +13,18 @@
 
 整个系统启动过程如下：
 
-    redis-server ./redis.6379.conf >log/6379.log 2>&1 &    redis-server ./redis.6380.conf >log/6380.log 2>&1 &    redis-server ./redis.6381.conf >log/6381.log 2>&1 &        redis-server ./sentinel.26379.conf --sentinel >log/sentinel26379.log 2>&1 &    redis-server ./sentinel.26380.conf --sentinel >log/sentinel.23680.log 2>&1 &        redis-cli -h 192.168.47.120 -p 6380 slaveof 192.168.47.120 6379    redis-cli -h 192.168.47.120 -p 6381 slaveof 192.168.47.120 6379
+    redis-server ./redis.6379.conf >log/6379.log 2>&1 &
+    redis-server ./redis.6380.conf >log/6380.log 2>&1 &
+    redis-server ./redis.6381.conf >log/6381.log 2>&1 &
+    
+    redis-server ./sentinel.26379.conf --sentinel >log/sentinel26379.log 2>&1 &
+    redis-server ./sentinel.26380.conf --sentinel >log/sentinel.23680.log 2>&1 &
+    
+    redis-cli -h 192.168.47.120 -p 6380 slaveof 192.168.47.120 6379
+    redis-cli -h 192.168.47.120 -p 6381 slaveof 192.168.47.120 6379
 
-后续分析以该模型为基础，不断修改，争取构建一个适于分析redis的模型。
+
+后续分析以该模型为基础，不断修改，争取构建一个适于分析redis的模型。在该图中，有3种类型的节点，分别为主节点、从节点、监视节点。
 
 ## 2 数据类型
 ### 2.1 object
@@ -50,18 +61,23 @@ sds是一个动态字符串，本身被定义为char *，但在每个分配的�
 
 
     sds sdstrim(sds s, const char *cset);
+
 删除s中开始和结束包含cset的字符，若在开始有，会进行内存移动，保证sdshdr->buf总是有效的内存。
 
 
     sds sdsrange(sds s, int start, int end);
+
 把s从start截断到end。start和end为索引位置，如[1, -1]表示从第二个字节到s结束。若s开始位置有变动，则会进行memmove操作。
 
 
-    sds *sdssplitlen(const char *s, int len, const char *sep, int seplen, int *count);    void sdsfreesplitres(sds *tokens, int count);
+    sds *sdssplitlen(const char *s, int len, const char *sep, int seplen, int *count);
+    void sdsfreesplitres(sds *tokens, int count);
+
 将s以sep为分隔符分隔成若干个sds字符串，s和sep都是二进制安全的。
 
 
     sds sdscatrepr(sds s, const char *p, size_t len);
+
 将s转换成人可读的形式，首先在开始结束加上双引号，除下列字符其他字符不进行处理：
 
 * \, "：\\\, \\"
@@ -69,11 +85,14 @@ sds是一个动态字符串，本身被定义为char *，但在每个分配的�
 * 不可打印字符：\\x%02x的形式，如\\x0a
 
 
-    sds *sdssplitargs(const char *line, int *argc);    void sdssplitargs_free(sds *argv, int argc);
+    sds *sdssplitargs(const char *line, int *argc);
+    void sdssplitargs_free(sds *argv, int argc);
+
 将命令行参数解析成sds数组，argc表示数组大小。
 
 
     sds sdsmapchars(sds s, const char *from, const char *to, size_t setlen);
+
 将s中from字符集的字符映射成to中的对应字符集，setlen表示from和to中字符集的个数，二者必须严格一一对应。
 
 #### 2.1.2 adlist
@@ -161,10 +180,18 @@ zipmap本身结构较简单，各部分含义如下：
 
 对于哈希串，{ foo => bar, hello => world }，其zipmap内存布局为（忽略换行和空格）：
 
-    0x02    0x03 foo 0x03 0x00 bar    0x05 hello 0x05 0x00 world    0xFF
+    0x02
+    0x03 foo 0x03 0x00 bar
+    0x05 hello 0x05 0x00 world
+    0xFF
+
 若将hello => world修改为hello => krt, 则第二个节点的valuefreelen变为0x02，最终结果如下：
 
-    0x02    0x03 foo 0x03 0x00 bar    0x05 hello 0x03 0x02 krtld    0xFF
+    0x02
+    0x03 foo 0x03 0x00 bar
+    0x05 hello 0x03 0x02 krtld
+    0xFF
+
 
 #### 2.1.7 zskiplist
 
@@ -328,6 +355,33 @@ serverCron
 * cronloops加1，每个cronloops值代表大约1ms。
 
 ## 4 sentinel
+监视节点监视各个数据库和其他监视节点的状态，实现Redis的HA功能。在sentinel内部实现中，对各个节点的监视通过数据类型sentinelRedisInstance来表示，每个节点都有一个对应的该数据结构来表示，我称之为监视实例，故也有3种类型的监视实例，分别是主节点监视实例、从节点监视实例、监视节点监视实例。
+
+命令：
+
+* ping
+* sentinel
+* subscribe、unsubscribe、psubscribe、punsubscribe
+* info
+
+### 4.1 对象组织
+sentinelRedisInstance表示对监控的对象的描述，有3种类型的监控对象：redis主节点、redis从节点、redis监控节点。分别对应三个标志：SRI_MASTER、SRI_SLAVE、SRI_SENTINEL。runid是监控的对象的runid，addr中ip和port标识了被监控对象的地址和端口。对应示例中网络拓扑结构，则在每个sentinel进程中，共有4个sentinelRedisInstance对象，分别为1个主节点对象、2个从节点对象、1个监控节点对象，其组织方式如下图所示。
+
+![redis-sentinel-topology][14]
+
+
+监视节点启动的时候只在配置文件中通过monitor指令创建主节点的监视实例，从节点的监视实例是通过监视节点的info命令发现而创建，对于监视节点的监视实例则通过publish推送的信息去发现而创建。
+
+sentinel工作的要点：
+
+* 通过info等发现slave节点，创建slave sentinel实例，更新其节点信息；hello频道发现sentinel节点，创建sentinel sentinel实例，更新其节点信息；ping命令来判断监视的节点是否可用，当发现某个master节点down时，就进行failover动作。
+* 发现master节点down，进行failover；分为3个过程：
+
+    * 询问其他sentinel以判断master是否真正down；
+    * 选举leader，该sentinel进行failover操作；
+    * failover状态机；该过程中需要slave节点到新的master节点的复制过程（重配置）
+
+### 4.2 初始化
 sentinel服务器初始化流程，与数据库服务器相比，多数流程一样，少了部分与数据库相关的初始化工作，同时也做了一些数据有关的无用初始化。
 
 * 初始化服务器参数，如设置OOM处理器、字典随机数种子，初始化服务器默认配置initServerConfig。
@@ -350,59 +404,76 @@ sentinel服务器初始化流程，与数据库服务器相比，多数流程一
 
 * 事件循环，服务器初始化完成，各子模块开始干活。
 
-命令：
+### 4.3 监视实例信息更新
+sentinel通过周期性任务执行info、ping、publish更新监视节点的信息，在函数sentinelPingInstance中进行了该动作。
 
-* ping
-* sentinel
-* subscribe、unsubscribe、psubscribe、punsubscribe
-* info
+@WHY 在ping函数中，并没有看见发送info命令给监视节点？
 
-sentinel到节点连接的命令或pubsub异步处理回调
+#### 4.3.1 info
+对主从节点每10s发送一个info命令；若master已经被认为挂掉了，或者正在进行failover动作，则每1s发送一个info命令。
 
-auth命令
-什么也不做，只是简单的减小挂起命令的计数器
+当sentinel接收到info命令的响应后，首先sentinel更新对监视节点的信息，然后会根据监视节点的状态执行一系列动作。sentinel更新以下信息：
 
-SENTINEL_HELLO_CHANNEL __sentinel__:hello
-sentinelReceiveHelloMessages
-通过该频道就可以知道有哪些监视器正在监控master节点，保存到sentinel->sentinels字典中
+* runid，更新监视节点的runid信息；
+* 发现从节点，根据以下信息在sentinel->slaves下创建从节点的监视实例；
 
-info
-sentinelInfoReplyCallback
-在info命令的回调函数中，当前sentinel会获取监视的master节点的slave节点信息，并加入到sentinel->slaves中。
+    slave0:<ip>,<port>,<state>
 
-函数第二部分中，主要就是处理
 
-* master节点转换成slave
-* slave节点转换成master
-* 从节点改变配置
+* 更新master_link_down_time状态；
+* 更新被监视节点的role状态，或为mater或为slave；
+* 更新被监视的从节点状态，包括master_host、master_port、master_link_status、slave_priority，其中master_link_status用于标识从节点与主节点的连接情况，若从节点已完成主从复制，处于REDIS_REPL_CONNECTED状态，则为up。
 
-ping
-sentinelPingReplyCallback
+当更新完状态后，在info响应函数的下半部会进行一些处理。
 
-publish
-sentinelPublishReplyCallback
-向master节点的SENTINEL_HELLO_CHANNEL频道发布\<ip>:\<port>:\<runid>:\<can-failover>消息，
+若当前被监视的节点已经由主节点转为从节点，则将该监视实例转换到新的主节点位置上，主要动作是重置该监视实例的状态信息，设置其监视的ip和port为新的主节点。
 
-sentinel工作的要点：
+若当前被监视的节点由从节点转为主节点，则分为3种情况：
 
-* 通过info等发现slave节点，创建slave sentinel实例；hello频道发现sentinel节点，创建sentinel sentinel实例；ping命令来判断监视的节点是否可用，当发现某个master节点down时，就进行failover动作。
-* 发现master节点down，进行failover；分为3个过程：
+* 若该从节点不在主从转换过程，且runid被改变了或之前runid为空，则认为则是以错误配置文件启动了该被监视节点，直接将其从监视的slave实例中删除。
+* 若当前监视的实例属于被提升的从节点，且监视主节点的实例处于SENTINEL_FAILOVER_STATE_WAIT_PROMOTION状态，则将主节点的监视实例状态变为SENTINEL_FAILOVER_STATE_RECONF_SLAVES，同时以主节点监视实例（leader的身份）将重配置脚本添加到待运行脚本中。
+* 非leader作为观察者，对于还没有开始failover或者处于SENTINEL_FAILOVER_STATE_WAIT_START状态，则状态机直接进入SENTINEL_FAILOVER_STATE_DETECT_END，跳过了选择谁被promoted等动作，直接让其他slave节点到该节点进行复制。在这里假设leader已经给其他从节点发送了slaveof命令，仅仅等待重配置完成。
 
-    * 询问其他sentinel以判断master是否真正down；
-    * 选举leader，该sentinel进行failover操作；
-    * failover状态机；该过程中需要slave节点到新的master节点的复制过程（重配置）
+更新从节点复制的状态，分为两种情况：
 
-failover流程
+* 当前监视实例是被提升为新的主节点的从节点，且处于SRI_RECONF_SENT，则取消该标志，设置为SRI_RECONF_INPROG（等其他所有从节点已经从新的主节点复制完成数据，才将该标志置为SRI_RECONF_DONE？）。
+* 其他从节点已经完成了复制（由上面info的信息更新），则设置为SRI_RECONF_DONE。
+
+#### 4.3.2 publish
+对主节点每5s发送一个publish命令，通过主节点的__sentinel__:hello频道推送以下信息。当主节点的监视实例收到该推消息时，通过该频道就可以知道有哪些监视器正在监控master节点，保存到sentinel->sentinels字典中，从而构建对主节点监视的都有哪些监视节点。
+
+    <ip>:<port>:<runid>:<can-failover>
+
+
+#### 4.3.3 ping
+对master、slave、sentinel所有节点每秒发送一个ping命令。根据不同响应更新对应节点监视实例的状态：
+
+* PONG/LOADING/MASTERDOWN，则更新节点可达，即更新ri->last_avail_time。
+* BUSY，且实例为S_DOWN，则发送script kill。
+
+### 4.4 failover
+failover流程如下所示：
 
 * sentinelCheckObjectivelyDown。当某个sentinel发现master不可用，则计数有多少其他sentinel也认为master不可用了，若超过sentinel->quorum，则设置sentinel->flags中的SRI_O_DOWN，准备进入failover流程。
 * sentinelStartFailoverIfNeeded。首先检查sentinel是否认为master为SRI_O_DOWN，并且能够进行failover，否则直接返回，进入步骤3。然后
 
     * 进行选举，若当前sentinel不是leader或者选择失败，则直接返回
     * leader选择需要升级的slave节点，若slave节点为NULL，直接返回，准备下一轮选举和promoted
-    * 开始进入failover动作，sentinelStartFailover 函数还不太明白。SENTINEL_FAILOVER_STATE_WAIT_START
+    * 开始进入failover动作，sentinelStartFailover。SENTINEL_FAILOVER_STATE_WAIT_START
 
 * sentinelFailoverStateMachine。未进行failover直接返回，进入步骤4。
 * sentinelAbortFailoverIfNeeded。
+
+failover状态机如下所示：
+
+* SENTINEL_FAILOVER_STATE_WAIT_START sentinelFailoverWaitStart，判断是否需要真正进入failover，有些情况可能不需要；同时看是否达到failover准备开始的时间点，若是，则进入下一个状态。
+* SENTINEL_FAILOVER_STATE_SELECT_SLAVE sentinelFailoverSelectSlave，promoted某个slave节点，leader选择需要升级的slave节点的方法 sentinelSelectSlave：遍历sentinel->slaves，过滤掉一些不合法的slave节点（@WHY过滤策略中有一些没看懂），将合法的slave节点放在一个数组中，然后对这些slave节点进行比较（比较方法为先根据slave_priority比较，若二者相等，在比较runid，runid为NULL的较大），选择最小的slave节点进行升级。
+* SENTINEL_FAILOVER_STATE_SEND_SLAVEOF_NOONE sentinelFailoverSendSlaveOfNoOne，发送异步命令slaveof no one到promoted slave节点。
+* SENTINEL_FAILOVER_STATE_WAIT_PROMOTION sentinelFailoverWaitPromotion，检查promoted slave是否超时，若超时则状态转入SENTINEL_FAILOVER_STATE_SELECT_SLAVE。
+* SENTINEL_FAILOVER_STATE_RECONF_SLAVES sentinelFailoverReconfNextSlave。向其他从节点发送slaveof命令，从新的master节点同步数据。完成后，检查是否完成。
+* SENTINEL_FAILOVER_STATE_DETECT_END sentinelFailoverDetectEnd。
+
+除了sentinel要明白在failover中的动作（多个sentinel之间时如何交互的），也要明白slave节点从slave转到master过程中需要完成一些什么。
 
 选举过程 sentinelGetObjectiveLeader
 
@@ -425,22 +496,13 @@ failover流程
     * 未设置SRI_CAN_FAILOVER
     * runid非空，且状态不是SRI_DISCONNECTED
 
-状态机
-
-* SENTINEL_FAILOVER_STATE_WAIT_START sentinelFailoverWaitStart，判断是否需要真正进入failover，有些情况可能不需要；同时看是否达到failover准备开始的时间点，若是，则进入下一个状态。
-* SENTINEL_FAILOVER_STATE_SELECT_SLAVE sentinelFailoverSelectSlave，promoted某个slave节点，leader选择需要升级的slave节点的方法 sentinelSelectSlave：遍历sentinel->slaves，过滤掉一些不合法的slave节点（@WHY过滤策略中有一些没看懂），将合法的slave节点放在一个数组中，然后对这些slave节点进行比较（比较方法为先根据slave_priority比较，若二者相等，在比较runid，runid为NULL的较大），选择最小的slave节点进行升级。
-* SENTINEL_FAILOVER_STATE_SEND_SLAVEOF_NOONE sentinelFailoverSendSlaveOfNoOne，发送异步命令slaveof no one到promoted slave节点。
-* SENTINEL_FAILOVER_STATE_WAIT_PROMOTION sentinelFailoverWaitPromotion，检查promoted slave是否超时，若超时则状态转入SENTINEL_FAILOVER_STATE_SELECT_SLAVE。
-* SENTINEL_FAILOVER_STATE_RECONF_SLAVES sentinelFailoverReconfNextSlave。向其他从节点发送slaveof命令，从新的master节点同步数据。完成后，检查是否完成。
-* SENTINEL_FAILOVER_STATE_DETECT_END sentinelFailoverDetectEnd。
-
-除了sentinel要明白在failover中的动作（多个sentinel之间时如何交互的），也要明白slave节点从slave转到master过程中需要完成一些什么。
+### 4.5 tilt模式
 
 ## 5 服务器各子模块
 ### 5.1 客户端
 这里客户端是指Redis服务器在处理来自客户端的请求过程中管理资源和请求处理的对象，即围绕redisClient对象所做的工作。networking.c文件中主要就是关于这部分的代码。服务器对其管理的方式是利用链表管理所有客户端，并以客户端对应的fd（非脚本类的客户端，该小节只涉及普通的套接字的客户端）为索引添加到事件处理结构中，其中aeFileEvent->clientDat就指向该结构；对于需要关闭的客户端，也组织在一个链表clients_to_close中， redisClient结构用来表示对端的请求、请求解析、请求处理中间参数以及最终的响应（其他如multi、pubsub等本小节暂不涉及）如下图所示：
 
-![redis-client][14]
+![redis-client][15]
 
 
 #### 5.1.1 接收请求
@@ -492,7 +554,7 @@ monitor
 ### 5.2 复制
 复制的过程如下图所示
 
-![redis-replication-interaction][15]
+![redis-replication-interaction][16]
 
 
 每次读取时最多读取16K的数据。
@@ -508,10 +570,14 @@ Redis持久化有RDB和AOF两种方式，而针对AOF有appendonly和rewrite两�
 
 appendonly会严格的记录对数据库有修改的所有操作，而rewrite则是数据库快照转换成AOF格式，完成后会替换掉appendonly的文件，文件因更小。如数据库执行了以下操作
 
-    RPUSH mylist [1, 2, 3, 4]    RPOP mylist    LPUSH mylist 4
+    RPUSH mylist [1, 2, 3, 4]
+    RPOP mylist
+    LPUSH mylist 4
+
 那么appendonly方式会记录以上3条命令，而rewrite只会记录最终状态的一条命令，即
 
     RPUSH mylist [4, 1, 2, 3]
+
 
 #### 5.5.1 appendonly aof
 当打开appendonly标志时，数据库服务器执行的每条命令都会添加到aof_buf中，feedAppendOnlyFile函数进行该动作。该函数执行的动作如下：
@@ -528,7 +594,7 @@ appendonly会严格的记录对数据库有修改的所有操作，而rewrite则
 * 正常结束，将rewrite_buf追加到临时AOF文件中，进行AOF文件同步，打开REDIS_AOF_ON标志（这意味着后续的操作将写入aof_buf中），同时删除旧的（若有）aof_filename，将临时aof文件重命名为aof_filename；
 * 非正常结束，重新调度，状态转为REDIS_AOF_WAIT_REWRITE，下次进入serverCron时重新开始AOF基本流程。
 
-在上述动作中，文件同步、关闭文件、重命名文件都可能造成服务器阻塞，参考代码io_delay.c（地址[https://github.com/kiterunner-t/krt/blob/master/t/linux/src/io/io_delay.c][16]），对于前面两者redis使用后台bio进行异步调用，而对于重命名则通过保留一个原始aof_fd的引用，然后放到后台去关闭来解决。
+在上述动作中，文件同步、关闭文件、重命名文件都可能造成服务器阻塞，参考代码io_delay.c（地址[https://github.com/kiterunner-t/krt/blob/master/t/linux/src/io/io_delay.c][17]），对于前面两者redis使用后台bio进行异步调用，而对于重命名则通过保留一个原始aof_fd的引用，然后放到后台去关闭来解决。
 
 ### 5.6 rdb
 #### 5.6.1 rdb文件格式
@@ -543,19 +609,19 @@ rdb文件格式按照下述规则进行写入：REDIS + 4字节版本号 + 数�
 
 写入value的类型，根据对象的类型和编码来决定类型
 
-![redis-rdb-type][17]
+![redis-rdb-type][18]
 
 
 value编码规则如下：
 
-![redis-rdb-value][18]
+![redis-rdb-value][19]
 
 
 STRING分为INT整数和RAWSTRING两种类型，根据编码规则不同分别使用对应的类型进行编码。
 
 INT整数存储规则
 
-![redis-rdb-int][19]
+![redis-rdb-int][20]
 
 
 RAWSTRING存储分3种情况
@@ -567,33 +633,33 @@ RAWSTRING存储分3种情况
 
 长度存储规则
 
-![redis-rdb-len][20]
+![redis-rdb-len][21]
 
 
 double类型规则如下
 
-![redis-rdb-double][21]
+![redis-rdb-double][22]
 
 ### 5.7 slowlog
 慢速日志记录了那些最耗时的命令及其相关信息，如下图所示，slowlog_log_lower_than小于0时，表示禁用该功能；否则执行时间该值的命令都会被记录在slowlog链表中。slowlog_max_len表示链表的最大长度，当超过该值时，旧的slowlog将会从链表中删除。slowlogEntry中参数argv最多为32，当超过32时，最后一个参数（即第32个）表示该命令后续还剩多少参数，而对于字符串对象参数来说，slowlog只复制前128字节，后续字节被抛弃，其他对象增加引用计数即可。
 
-![redis-slowlog][22]
+![redis-slowlog][23]
 
 
 慢速日志从头部开始插入，丢弃是从链表末尾开始。提供了slowlog命令可以访问该子模块信息
 
-![redis-slowlog-command][23]
+![redis-slowlog-command][24]
 
 
 ### 5.8 pubsub
 在redisServer存储了每个频道有哪些client订阅了，每个client订阅了哪些模式（每个client的不同模式会有不同节点，这是通过client下的pattern链表控制的）。发布消息时，先发那些直接订阅的client，然后在遍历模式列表进行模式匹配，匹配的则发送消息。如下图所示，CLIENT_A订阅了频道hello及频道模式PATTERN_A、PATTERN_B：
 
-![redis-pubsub][24]
+![redis-pubsub][25]
 
 
 命令如下图所示：
 
-![redis-pubsub-command][25]
+![redis-pubsub-command][26]
 
 
 频道模式使用glob规则，参考util.c中函数stringmatchlen。
@@ -603,7 +669,7 @@ double类型规则如下
 ### 5.9 scripts
 命令以script开始，见下表
 
-![redis-lua-command][26]
+![redis-lua-command][27]
 
 
 lua函数都以f_\<sha-func-body>来命名存在server.lua_scripts中（见图）。该模块只要工作是提供lua运行环境，提供一些基本的安全的lua函数，提供用户自定义函数脚本，并提供Redis C协议和lua栈之间的转换。
@@ -614,7 +680,7 @@ lua函数都以f_\<sha-func-body>来命名存在server.lua_scripts中（见图�
 ### 6.1 事件循环
 这里以epoll演示事件循环的机制，不同事件底层机制不同点在于aeApiState。
 
-![redis-eventloop][27]
+![redis-eventloop][28]
 
 提供了以下基本接口
 
@@ -640,10 +706,16 @@ hiredis是一个很小巧的用于Redis数据库的客户端库代码，提供�
 #### 6.2.1 同步
 6种reply对象：字符串（STATUS和ERROR也是字符串类型）、整数、NIL、ARRAY。
 
-    *2 \r\n    $5 \r\n hello \r\n    *3 \r\n    :42 \r\n    +status \r\n    -error \r\n
+    *2 \r\n
+    $5 \r\n hello \r\n
+    *3 \r\n
+    :42 \r\n
+    +status \r\n
+    -error \r\n
+
 上面是一串响应，则结构如下图所示（忽略空格，\r\n为ascii的可读形式）。
 
-![hiredis-sync][28]
+![hiredis-sync][29]
 
 
 整个流程可以简单用文字概括如下：
@@ -658,12 +730,18 @@ hiredis是一个很小巧的用于Redis数据库的客户端库代码，提供�
 
 API如下：
 
-    redisContext *redisConnect(const char *ip, int port);    void redisFree(redisContext *c);    void *redisCommand(redisContext *c, const char *fmt, ...);    void redisAppendCommand(redisContext *c, const char *fmt, ...);    int redisGetReply(redisContext *ctx, redisReply **reply);    void freeReplyObject(void *reply);
+    redisContext *redisConnect(const char *ip, int port);
+    void redisFree(redisContext *c);
+    void *redisCommand(redisContext *c, const char *fmt, ...);
+    void redisAppendCommand(redisContext *c, const char *fmt, ...);
+    int redisGetReply(redisContext *ctx, redisReply **reply);
+    void freeReplyObject(void *reply);
+
 
 #### 6.2.2 异步
 hiredis也提供了异步的方式进行客户服务端的沟通。如下图所示，异步方式需要与事件循环机制结合，图中所示为ae的数据结构（绿色部分，其他事件循环机制如libev、libevent有所不同）。
 
-![hiredis-async][29]
+![hiredis-async][30]
 
 
 异步解析的流程为：
@@ -679,27 +757,38 @@ hiredis也提供了异步的方式进行客户服务端的沟通。如下图所�
 ### 6.3 rio
 rio提供了基于文件流和内存流的读、写、位置通告、校验和操作方法（若设置了校验和方法，读写前会进行校验和更新操作），并提供了用于写Redis协议的高层API函数。其基本结构如下图所示（橙色表示函数指针），其中rioFileIO使用标准C流式文件IO进行流式IO操作，rioBufferIO使用sds进行内存流式IO操作。
 
-![redis-rio][30]
+![redis-rio][31]
 
 
 提供了几个API使用，如下
 
-    void rioInitWithFile(rio *r, FILE *fp);    void rioInitWithBuffer(rio *r, sds s);        size_t rioWrite(rio *r, const void *buf, size_t len);    size_t rioRead(rio *r, void *buf, size_t len);    off_t rioTell(rio *r);    void rioGenericUpdateChecksum(rio *r, const void *buf, size_t len);
+    void rioInitWithFile(rio *r, FILE *fp);
+    void rioInitWithBuffer(rio *r, sds s);
+    
+    size_t rioWrite(rio *r, const void *buf, size_t len);
+    size_t rioRead(rio *r, void *buf, size_t len);
+    off_t rioTell(rio *r);
+    void rioGenericUpdateChecksum(rio *r, const void *buf, size_t len);
+
 
 提供了几个更高层次的API用于Redis二进制协议操作的函数。
 
-![redis-rio-api][31]
+![redis-rio-api][32]
 
 
 ### 6.4 bio
 bio通过使用后台线程来执行可能阻塞服务器的操作，目前支持两个操作close和fsync。其实现是通过为每个任务创建一个线程，线程在操作的条件变量上等待任务链表中有任务可做；当调用者有任务可做时，通过bio的接口，将任务放在list中，并通知线程进行处理。线程屏蔽了SIGALRM（Redis用其作为watchdog），防止该后台任务处理线程接收到该信号。结构如下图所示（Redis实现中并没有bio结构体，bio中所有成员都是以文件静态变量的形式单独存放）：
 
-![redis-bio][32]
+![redis-bio][33]
 
 
 接口如下，初始化过程中会根据类型创建不同的后台线程等待任务执行；创建任务时，提交相应任务到对应的链表中，增加计数器，并通知后台线程进行任务处理；bio_pending保存了后台需要处理的任务数量，可以通过接口获取该值。
 
-    void bioInit(void);    void bioCreateBackgroundJob(int type,                                      void *arg1, void *arg2, void *arg3);    unsigned long long bioPendingJobsOfType(int type);
+    void bioInit(void);
+    void bioCreateBackgroundJob(int type,
+                                      void *arg1, void *arg2, void *arg3);
+    unsigned long long bioPendingJobsOfType(int type);
+
 
 
 [1]: images/redis/redis-topology.png "redis-topology"
@@ -715,22 +804,23 @@ bio通过使用后台线程来执行可能阻塞服务器的操作，目前支�
 [11]: images/redis/redis-db.png "redis-db"
 [12]: images/redis/redis-db-list.png "redis-db-list"
 [13]: images/redis/redis-event-table.png "redis-event-table"
-[14]: images/redis/redis-client.png "redis-client"
-[15]: images/redis/redis-replication-interaction.png "redis-replication-interaction"
-[17]: images/redis/redis-rdb-type.png "redis-rdb-type"
-[18]: images/redis/redis-rdb-value.png "redis-rdb-value"
-[19]: images/redis/redis-rdb-int.png "redis-rdb-int"
-[20]: images/redis/redis-rdb-len.png "redis-rdb-len"
-[21]: images/redis/redis-rdb-double.png "redis-rdb-double"
-[22]: images/redis/redis-slowlog.png "redis-slowlog"
-[23]: images/redis/redis-slowlog-command.png "redis-slowlog-command"
-[24]: images/redis/redis-pubsub.png "redis-pubsub"
-[25]: images/redis/redis-pubsub-command.png "redis-pubsub-command"
-[26]: images/redis/redis-lua-command.png "redis-lua-command"
-[27]: images/redis/redis-eventloop.png "redis-eventloop"
-[28]: images/redis/hiredis-sync.png "hiredis-sync"
-[29]: images/redis/hiredis-async.png "hiredis-async"
-[30]: images/redis/redis-rio.png "redis-rio"
-[31]: images/redis/redis-rio-api.png "redis-rio-api"
-[32]: images/redis/redis-bio.png "redis-bio"
-[16]: https://github.com/kiterunner-t/krt/blob/master/t/linux/src/io/io_delay.c
+[14]: images/redis/redis-sentinel-topology.png "redis-sentinel-topology"
+[15]: images/redis/redis-client.png "redis-client"
+[16]: images/redis/redis-replication-interaction.png "redis-replication-interaction"
+[18]: images/redis/redis-rdb-type.png "redis-rdb-type"
+[19]: images/redis/redis-rdb-value.png "redis-rdb-value"
+[20]: images/redis/redis-rdb-int.png "redis-rdb-int"
+[21]: images/redis/redis-rdb-len.png "redis-rdb-len"
+[22]: images/redis/redis-rdb-double.png "redis-rdb-double"
+[23]: images/redis/redis-slowlog.png "redis-slowlog"
+[24]: images/redis/redis-slowlog-command.png "redis-slowlog-command"
+[25]: images/redis/redis-pubsub.png "redis-pubsub"
+[26]: images/redis/redis-pubsub-command.png "redis-pubsub-command"
+[27]: images/redis/redis-lua-command.png "redis-lua-command"
+[28]: images/redis/redis-eventloop.png "redis-eventloop"
+[29]: images/redis/hiredis-sync.png "hiredis-sync"
+[30]: images/redis/hiredis-async.png "hiredis-async"
+[31]: images/redis/redis-rio.png "redis-rio"
+[32]: images/redis/redis-rio-api.png "redis-rio-api"
+[33]: images/redis/redis-bio.png "redis-bio"
+[17]: https://github.com/kiterunner-t/krt/blob/master/t/linux/src/io/io_delay.c
